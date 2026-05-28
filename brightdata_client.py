@@ -16,6 +16,7 @@ Docs: https://docs.brightdata.com/api-reference/web-scraper-api/scrape
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Iterable
 
@@ -78,14 +79,21 @@ def _scrape(inputs: list[dict], timeout_s: int = DEFAULT_TIMEOUT_S) -> list[dict
         timeout=timeout_s,
     )
     r.raise_for_status()
-    data = r.json()
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        rows = data.get("data") or data.get("results") or []
-    else:
-        rows = []
-    return [row for row in rows if isinstance(row, dict) and not row.get("error")]
+    # BrightData's /scrape returns JSONL (one JSON object per line), not JSON.
+    # A single-row response is valid JSON too, but multi-row isn't — parse line
+    # by line in all cases so both shapes work.
+    rows: list[dict] = []
+    for line in r.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and not obj.get("error"):
+            rows.append(obj)
+    return rows
 
 
 def _row_to_fetched_post(row: dict) -> FetchedPost:
@@ -108,14 +116,19 @@ def _row_to_fetched_post(row: dict) -> FetchedPost:
     replies = int(row.get("replies") or row.get("comments") or 0)
     total_events = max(likes + reposts + replies, 5)
 
-    # Post age in seconds
-    age_seconds = 24 * 3600
-    if "date_posted" in row or "timestamp" in row:
-        from datetime import datetime, timezone
-        ts = row.get("date_posted") or row.get("timestamp")
+    # Cap the synthesized cascade window at 24h. Real engagement concentrates
+    # in the first day; using the full post age (which can be years) makes
+    # fingerprint features fall far outside the reference cluster scale and
+    # produces nonsense verdicts. For posts younger than 24h, use actual age.
+    from datetime import datetime, timezone
+    CASCADE_WINDOW_S = 24 * 3600
+    age_seconds = CASCADE_WINDOW_S
+    ts = row.get("date_posted") or row.get("timestamp")
+    if ts:
         try:
-            posted = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            age_seconds = (datetime.now(timezone.utc) - posted).total_seconds()
+            posted = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            actual = (datetime.now(timezone.utc) - posted).total_seconds()
+            age_seconds = float(min(max(actual, 600.0), CASCADE_WINDOW_S))
         except (ValueError, AttributeError):
             pass
 
