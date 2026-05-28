@@ -183,7 +183,7 @@ def render_overview() -> None:
 
     st.markdown("---")
 
-    # ---------- 3. The wedge ----------
+    # ---------- 3. Our wedge ----------
     st.markdown("## Our wedge")
     st.success(
         "**We don't judge content. We measure spread.** "
@@ -193,16 +193,41 @@ def render_overview() -> None:
         "when the same network pushes them. Output: organic vs coordinated, "
         "not true vs false. A human reviewer decides what to do with the flag."
     )
-    st.caption(
-        "**Why nutrition first**: highest-leverage proving ground — large "
-        "volume, vulnerable users, clear bad actors, low platform "
-        "intervention. If it works here, the same pipeline works on "
-        "financial scams, political astroturfing, and health misinformation."
-    )
 
     st.markdown("---")
 
-    # ---------- 4. Live proof ----------
+    # ---------- 4. Proof domain — why nutrition ----------
+    st.markdown("## Proof domain — why nutrition")
+    pd1, pd2 = st.columns([2, 1])
+    with pd1:
+        st.markdown(
+            "We picked **nutrition on X/Twitter** as the wedge to prove this "
+            "tech works end-to-end. It is the highest-leverage proving ground "
+            "we could find:\n\n"
+            "- **Vulnerable audiences** — teenagers, sick people, parents of "
+            "sick kids, people with eating disorders.\n"
+            "- **Strong monetary incentives** — supplement industry, "
+            "alt-health markets, weight-loss products, anti-mainstream-medicine "
+            "campaigns.\n"
+            "- **Speech-protected** — most claims are opinions or "
+            "unfalsifiable. Platforms can't moderate, but bot amplification is "
+            "still real harm.\n"
+            "- **High volume** — millions of nutrition posts per day, so "
+            "patterns are statistically detectable."
+        )
+    with pd2:
+        st.info(
+            "**If it works on nutrition, the same pipeline works on:**\n\n"
+            "- Financial scams (crypto pumps, ozempic-alt sales)\n"
+            "- Political astroturfing\n"
+            "- Health misinformation\n"
+            "- Defamation campaigns\n"
+            "- State-sponsored influence ops"
+        )
+
+    st.markdown("---")
+
+    # ---------- 5. Working proof — live numbers ----------
     st.markdown("## Working proof — last 7 days")
     df = analyses_df(limit=2000)
     if df.empty:
