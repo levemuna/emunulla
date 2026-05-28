@@ -79,6 +79,7 @@ SECTIONS = [
     "Overview",
     "Analyze Post",
     "Detections",
+    "Forensics",
     "Topics & Accounts",
     "Targets",
     "Reply Queue",
@@ -281,6 +282,7 @@ def render_analyze() -> None:
         analysis_id = save_analysis(
             url=url, fp=input_fp, result=result, topic=topic,
             engager_ids=input_post.engager_ids or None,
+            event_times=input_post.event_times,
         )
         # If flagged with reasonable confidence, auto-draft a reply
         # (still pending human approval)
@@ -448,6 +450,308 @@ def render_detections() -> None:
                 fp_dict = {n: float(row[n]) for n in FEATURE_NAMES}
                 st.markdown("**Fingerprint**")
                 st.json(fp_dict, expanded=False)
+
+
+# =========================================================
+# Section: Forensics — SOC-style queries
+# =========================================================
+
+def _diffusion_curve(event_times: np.ndarray, bin_minutes: int = 5) -> pd.DataFrame:
+    """Bin event timestamps into minutes and return a velocity time series."""
+    if event_times.size == 0:
+        return pd.DataFrame({"minute": [], "events": []})
+    et = np.asarray(event_times, dtype=float)
+    et = et - et.min()
+    bin_s = bin_minutes * 60
+    n_bins = max(int(et.max() / bin_s) + 1, 5)
+    counts, edges = np.histogram(et, bins=n_bins, range=(0, n_bins * bin_s))
+    return pd.DataFrame({
+        "minute": edges[:-1] / 60.0,
+        "events": counts,
+    })
+
+
+def _expected_organic_curve(duration_minutes: float, total_events: int) -> pd.DataFrame:
+    """Synthesize what an organic diffusion of similar size SHOULD look like.
+    Uses a log-normal-ish shape (gentle rise, long tail) scaled to total events."""
+    n = max(int(duration_minutes / 5), 10)
+    t = np.linspace(0.01, duration_minutes, n)
+    # Long-tail organic shape: rises to ~10% of duration then decays slowly
+    peak_t = duration_minutes * 0.15
+    sigma = duration_minutes * 0.5
+    shape = np.exp(-((np.log(t) - np.log(peak_t)) ** 2) / (2 * (sigma / duration_minutes) ** 2))
+    shape = shape / shape.sum() * total_events
+    return pd.DataFrame({"minute": t, "events": shape})
+
+
+def render_forensics() -> None:
+    st.title("Forensics")
+    st.caption(
+        "SOC-style queries on the detection corpus: cross-post correlation, "
+        "campaign clusters, deviation-from-baseline, topic anomalies. "
+        "Pick a saved detection on the right to drill into its diffusion curve."
+    )
+
+    df = analyses_df(limit=2000)
+    if df.empty:
+        st.info("No analyses yet. Use **Analyze Post** or **Daily Check → Run Now** "
+                "to populate the corpus.")
+        return
+
+    # ---------- Top filter bar ----------
+    fb1, fb2, fb3, fb4 = st.columns([1, 1, 1, 1])
+    with fb1:
+        time_window = st.selectbox("Window", ["24h", "7d", "30d", "all"], index=1)
+    with fb2:
+        only_flagged = st.toggle("Coordinated only", value=True)
+    with fb3:
+        min_margin = st.slider("Min margin", 0.0, 1.0, 0.0, 0.05)
+    with fb4:
+        topics_in_data = sorted(df["topic"].dropna().unique().tolist())
+        topic_filter = st.multiselect("Topics", topics_in_data, default=[])
+
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    if time_window == "24h":
+        df = df[df["analyzed_at"] >= now - pd.Timedelta(hours=24)]
+    elif time_window == "7d":
+        df = df[df["analyzed_at"] >= now - pd.Timedelta(days=7)]
+    elif time_window == "30d":
+        df = df[df["analyzed_at"] >= now - pd.Timedelta(days=30)]
+    if only_flagged:
+        df = df[df["verdict"] == "coordinated"]
+    df = df[df["confidence_margin"].fillna(0) >= min_margin]
+    if topic_filter:
+        df = df[df["topic"].isin(topic_filter)]
+
+    st.write(f"**{len(df)}** detections in scope.")
+    if df.empty:
+        st.warning("No detections match the current filters.")
+        return
+
+    st.markdown("---")
+
+    # ---------- Panel 1: Diffusion curve replay vs organic baseline ----------
+    st.subheader("1. Diffusion curve vs organic baseline")
+    st.caption(
+        "Pick a detection and overlay its real engagement timeline against what "
+        "an organic post of the same size would look like. Sharp spikes / multi-burst "
+        "patterns / clipped tails are coordinated indicators."
+    )
+    df_with_events = df[df["event_times_json"].notna()].copy()
+    if df_with_events.empty:
+        st.info("No detections in scope have replayable event timelines yet. "
+                "Run **Analyze Post** or **Daily Check** to generate some.")
+    else:
+        labels = [
+            f"#{r['id']} · {r['analyzed_at']:%m-%d %H:%M} · {r['topic']} · "
+            f"margin {(r['confidence_margin'] or 0)*100:.0f}% · {r['url'][:55]}"
+            for _, r in df_with_events.iterrows()
+        ]
+        pick_idx = st.selectbox("Detection", range(len(labels)),
+                                format_func=lambda i: labels[i])
+        row = df_with_events.iloc[pick_idx]
+        try:
+            et = np.array(json.loads(row["event_times_json"]), dtype=float)
+        except (TypeError, json.JSONDecodeError):
+            et = np.array([])
+        curve = _diffusion_curve(et, bin_minutes=5)
+        total = int(curve["events"].sum()) if not curve.empty else 0
+        dur_min = float(curve["minute"].max()) if not curve.empty else 60.0
+        baseline = _expected_organic_curve(dur_min, total)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=baseline["minute"], y=baseline["events"],
+            name="Expected organic", mode="lines",
+            line=dict(color="#2ecc71", width=2, dash="dot"),
+            fill="tozeroy", fillcolor="rgba(46,204,113,0.10)",
+        ))
+        fig.add_trace(go.Bar(
+            x=curve["minute"], y=curve["events"], name="Actual engagement",
+            marker=dict(color="#e74c3c"),
+        ))
+        fig.update_layout(
+            template="plotly_dark",
+            height=380,
+            xaxis_title="minutes since post",
+            yaxis_title="engagement events / 5-min bin",
+            barmode="overlay",
+            margin=dict(t=20, b=40, l=40, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Drift summary
+        actual_peak = curve["events"].max() if not curve.empty else 0
+        expected_peak = baseline["events"].max() if not baseline.empty else 0
+        peak_ratio = actual_peak / max(expected_peak, 0.5)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Events", total)
+        m2.metric("Actual peak", f"{actual_peak:.0f}")
+        m3.metric("Expected peak", f"{expected_peak:.0f}")
+        m4.metric("Peak ratio", f"{peak_ratio:.1f}x",
+                  delta="anomalous" if peak_ratio > 2.5 else "within range",
+                  delta_color="inverse")
+
+    st.markdown("---")
+
+    # ---------- Panel 2: Campaign clusters (engager overlap matrix) ----------
+    st.subheader("2. Campaign clusters — engager overlap matrix")
+    st.caption(
+        "Rows and columns are flagged posts. A bright cell at (A, B) means the "
+        "same engagers showed up on both posts. Dense blocks = coordinated campaigns "
+        "operating through the same bot squad."
+    )
+    with_engagers = df[df["engager_ids"].notna()].copy()
+    if len(with_engagers) < 2:
+        st.info("Need at least 2 detections with engager data to compute overlap.")
+    else:
+        post_engagers = {}
+        for _, r in with_engagers.iterrows():
+            try:
+                eids = json.loads(r["engager_ids"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            post_engagers[r["id"]] = set(eids)
+        ids = list(post_engagers.keys())[:25]  # cap for readable matrix
+        n = len(ids)
+        matrix = np.zeros((n, n), dtype=int)
+        for i, a in enumerate(ids):
+            for j, b in enumerate(ids):
+                if i == j:
+                    matrix[i, j] = len(post_engagers[a])
+                else:
+                    matrix[i, j] = len(post_engagers[a] & post_engagers[b])
+        # Mask diagonal for visualization (self-overlap dominates)
+        display = matrix.copy().astype(float)
+        np.fill_diagonal(display, np.nan)
+        labels = [f"#{i}" for i in ids]
+        fig = px.imshow(
+            display, x=labels, y=labels,
+            color_continuous_scale="reds",
+            aspect="auto", height=500,
+            labels=dict(color="shared engagers"),
+        )
+        fig.update_layout(template="plotly_dark",
+                          margin=dict(t=20, b=40, l=40, r=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Top overlaps as a ranked table
+        overlaps = []
+        for i, a in enumerate(ids):
+            for j, b in enumerate(ids):
+                if j > i and matrix[i, j] > 0:
+                    overlaps.append({
+                        "post A": a, "post B": b,
+                        "shared engagers": int(matrix[i, j]),
+                        "A url": with_engagers[with_engagers["id"]==a]["url"].iat[0],
+                        "B url": with_engagers[with_engagers["id"]==b]["url"].iat[0],
+                    })
+        if overlaps:
+            df_o = pd.DataFrame(overlaps).sort_values(
+                "shared engagers", ascending=False).head(15)
+            st.write("**Top shared-engager pairs** (probable same campaign):")
+            st.dataframe(df_o, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ---------- Panel 3: Peak-velocity distribution ----------
+    st.subheader("3. Peak velocity — flagged vs organic baseline")
+    st.caption(
+        "Density of peak engagement velocity. Organic content concentrates "
+        "below ~10 events/min; flagged content shows a long tail to the right "
+        "or a separate mode."
+    )
+    full = analyses_df(limit=5000)
+    if not full.empty:
+        v_flag = full[full["verdict"] == "coordinated"]["peak_velocity_per_min"].dropna()
+        v_org = full[full["verdict"] == "organic"]["peak_velocity_per_min"].dropna()
+        fig = go.Figure()
+        if len(v_org) > 1:
+            fig.add_trace(go.Histogram(x=v_org, name="organic", opacity=0.7,
+                                        marker_color="#2ecc71", nbinsx=40))
+        if len(v_flag) > 1:
+            fig.add_trace(go.Histogram(x=v_flag, name="coordinated", opacity=0.7,
+                                        marker_color="#e74c3c", nbinsx=40))
+        fig.update_layout(template="plotly_dark", barmode="overlay", height=320,
+                          xaxis_title="peak velocity (events/min)",
+                          yaxis_title="count",
+                          margin=dict(t=10, b=40, l=40, r=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # ---------- Panel 4: Topic anomaly watch ----------
+    st.subheader("4. Topic anomaly watch — coord-rate jump week-over-week")
+    st.caption(
+        "Topics whose coordinated-detection rate changed most between the "
+        "previous 7 days and the current 7 days. Big positive deltas = "
+        "a new campaign starting in that vertical."
+    )
+    full = analyses_df(limit=5000)
+    if not full.empty:
+        now = pd.Timestamp.utcnow().tz_localize(None)
+        prev = full[(full["analyzed_at"] >= now - pd.Timedelta(days=14)) &
+                    (full["analyzed_at"] < now - pd.Timedelta(days=7))]
+        curr = full[full["analyzed_at"] >= now - pd.Timedelta(days=7)]
+
+        def rate(slice_df):
+            return (slice_df.assign(is_c=(slice_df["verdict"]=="coordinated").astype(int))
+                    .groupby(slice_df["topic"].fillna("other"))
+                    .agg(rate=("is_c", "mean"), n=("is_c", "size")))
+        r_prev, r_curr = rate(prev), rate(curr)
+        merged = r_curr.join(r_prev, lsuffix="_curr", rsuffix="_prev", how="outer").fillna(0)
+        merged["delta"] = merged["rate_curr"] - merged["rate_prev"]
+        merged = merged[merged["n_curr"] >= 2].sort_values("delta", ascending=False)
+        if not merged.empty:
+            display = merged.reset_index().rename(columns={
+                "topic": "Topic", "rate_curr": "rate (7d)", "rate_prev": "rate (prev 7d)",
+                "delta": "Δ", "n_curr": "n posts (7d)"})
+            fig = px.bar(display, x="Topic", y="Δ",
+                         color="Δ", color_continuous_scale="RdYlGn_r",
+                         height=320, hover_data=["rate (7d)", "rate (prev 7d)"])
+            fig.update_layout(template="plotly_dark", yaxis_tickformat=".0%",
+                              margin=dict(t=10, b=40, l=40, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(display[["Topic","rate (7d)","rate (prev 7d)","Δ","n posts (7d)"]],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("Not enough cross-week volume yet for anomaly detection.")
+
+    st.markdown("---")
+
+    # ---------- Panel 5: Feature deviation radar ----------
+    st.subheader("5. Feature deviation — which dimensions are most off")
+    st.caption(
+        "For each flagged detection, by how many standard deviations it sits "
+        "from the organic-cluster mean on each of the 5 fingerprint features. "
+        "High values on burstiness + peak_velocity + low avg_account_age "
+        "= classic coordinated profile."
+    )
+    if not df.empty:
+        all_feats, all_labels = load_reference()
+        org = all_feats[[l == "organic" for l in all_labels]]
+        if org.shape[0] > 0:
+            mu = org.mean(axis=0)
+            sd = org.std(axis=0) + 1e-9
+            zs = []
+            for _, r in df.head(50).iterrows():
+                v = np.array([
+                    r["time_to_peak_hours"], r["burstiness"], r["decay_exponent"],
+                    r["peak_velocity_per_min"], r["avg_account_age_days"],
+                ], dtype=float)
+                zs.append(np.abs((v - mu) / sd))
+            if zs:
+                z_arr = np.vstack(zs)
+                df_z = pd.DataFrame(z_arr.mean(axis=0).reshape(1, -1),
+                                    columns=FEATURE_NAMES,
+                                    index=["mean |z| of flagged in scope"]).T.reset_index()
+                df_z.columns = ["feature", "mean |z|"]
+                fig = px.bar(df_z, x="feature", y="mean |z|",
+                             color="mean |z|", color_continuous_scale="reds",
+                             height=300)
+                fig.update_layout(template="plotly_dark", xaxis_tickangle=-25,
+                                  margin=dict(t=10, b=40, l=40, r=10))
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -877,6 +1181,7 @@ RENDERERS = {
     "Overview": render_overview,
     "Analyze Post": render_analyze,
     "Detections": render_detections,
+    "Forensics": render_forensics,
     "Topics & Accounts": render_topics_accounts,
     "Targets": render_targets,
     "Reply Queue": render_reply_queue,

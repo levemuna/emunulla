@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     peak_velocity_per_min REAL,
     avg_account_age_days REAL,
     engager_ids TEXT,           -- JSON array of engager ID hashes
+    event_times_json TEXT,      -- JSON array of event timestamps (seconds)
     analyzed_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_verdict ON analyses(verdict);
@@ -302,6 +303,7 @@ def save_analysis(
     result: dict,
     topic: str | None = None,
     engager_ids: list[str] | None = None,
+    event_times: np.ndarray | None = None,
     path: Path = DB_PATH,
 ) -> int:
     import json
@@ -310,14 +312,17 @@ def save_analysis(
             "INSERT INTO analyses "
             "(url, topic, verdict, organic_dist, coordinated_dist, confidence_margin, "
             "time_to_peak_hours, burstiness, decay_exponent, "
-            "peak_velocity_per_min, avg_account_age_days, engager_ids) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "peak_velocity_per_min, avg_account_age_days, engager_ids, "
+            "event_times_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 url, topic, result["verdict"],
                 result.get("organic_dist"), result.get("coordinated_dist"),
                 result.get("confidence_margin"),
                 *map(float, fp),
                 json.dumps(engager_ids) if engager_ids else None,
+                json.dumps([float(t) for t in event_times.tolist()])
+                if event_times is not None and len(event_times) > 0 else None,
             ),
         )
         conn.commit()

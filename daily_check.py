@@ -76,6 +76,7 @@ def run_daily_check(verbose: bool = True) -> dict:
             analysis_id = save_analysis(
                 url=post.url, fp=fp, result=result,
                 topic=topic, engager_ids=post.engager_ids or None,
+                event_times=post.event_times,
             )
             target_summary["analyzed"] += 1
             summary["posts_analyzed"] += 1
