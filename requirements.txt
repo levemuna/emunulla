@@ -4,4 +4,9 @@ pandas>=2.0
 plotly>=5.18
 requests>=2.31
 snowflake-connector-python>=3.7
-playwright>=1.40
+
+# Scraping Browser backend works LOCALLY by adding `playwright` to a venv:
+#     uv pip install playwright
+# It is not added to this file because the package + its native deps
+# overflow Streamlit Cloud's free-tier build budget. On Cloud, use
+# DATA_SOURCE=snowflake or DATA_SOURCE=brightdata instead.
