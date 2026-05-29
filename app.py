@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 
 import numpy as np
@@ -458,6 +459,18 @@ def render_analyze() -> None:
         st.warning("Please paste a post URL.")
         return
     if not go_btn:
+        return
+
+    # In live mode the BrightData dataset requires a full POST url
+    # (.../status/<id>); a profile or search URL returns HTTP 400. Validate up
+    # front so the user gets a clear message instead of a crash or a silent
+    # mock fallback. Mock mode accepts any string (it hashes the URL).
+    if not is_mock() and not re.search(r"/status/\d+", url):
+        st.warning(
+            "Paste a full **post** URL — it must include `/status/<id>`, e.g. "
+            "`https://x.com/CNN/status/1796673270344810776`. "
+            "Profile and search URLs aren't supported by the data backend."
+        )
         return
 
     with st.spinner("Fetching and analyzing diffusion..."):
