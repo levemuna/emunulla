@@ -1370,6 +1370,59 @@ def render_daily_check() -> None:
             df_view = df_s[preferred + other] if preferred else df_s
             st.dataframe(df_view.head(50), use_container_width=True, hide_index=True)
 
+            # ---- Drill into a single session via /browser_sessions/<id> ----
+            id_col = next((c for c in ("session_id", "id") if c in df_s.columns), None)
+            if id_col:
+                st.markdown("**Inspect a session**")
+                sess_ids = df_s[id_col].dropna().astype(str).tolist()
+                _status_by_id = (
+                    dict(zip(df_s[id_col].astype(str), df_s["status"].astype(str)))
+                    if "status" in df_s.columns else {}
+                )
+
+                def _session_label(s: str) -> str:
+                    status = _status_by_id.get(s, "")
+                    return f"{s[:8]}…  ·  {status}" if status else f"{s[:8]}…"
+
+                picked = st.selectbox(
+                    "Session id", sess_ids,
+                    format_func=_session_label,
+                    key="bd_session_pick",
+                )
+                if st.button("Fetch session detail", key="bd_session_fetch"):
+                    with st.spinner(f"GET /browser_sessions/{picked}..."):
+                        detail = brightdata_client.get_browser_session(picked)
+                    st.session_state["bd_session_detail"] = detail
+
+                detail = st.session_state.get("bd_session_detail")
+                if detail is not None:
+                    if not detail.get("ok"):
+                        st.error(f"Failed: {detail.get('reason')}")
+                        if detail.get("body"):
+                            st.code(detail["body"])
+                    else:
+                        sess = detail["session"]
+                        d1, d2, d3, d4 = st.columns(4)
+                        d1.metric("Status", str(sess.get("status", "—")))
+                        dur = sess.get("duration")
+                        d2.metric("Duration",
+                                  f"{float(dur):.1f}s" if dur is not None else "—")
+                        d3.metric("Navigations", sess.get("navigations", "—"))
+                        bw = sess.get("bandwidth")
+                        d4.metric("Bandwidth",
+                                  f"{bw/1_048_576:.2f} MB" if isinstance(bw, (int, float))
+                                  else "—")
+                        if sess.get("target_url"):
+                            st.markdown(f"**Target**: {sess['target_url']}")
+                        if sess.get("end_url"):
+                            st.caption(f"End URL: {sess['end_url'][:140]}")
+                        if sess.get("error"):
+                            st.error(f"Session error: {sess['error']}")
+                        elif str(sess.get("captcha", "none")).lower() not in ("none", ""):
+                            st.warning(f"CAPTCHA encountered: {sess['captcha']}")
+                        with st.expander("Raw session payload"):
+                            st.json(sess)
+
             # Sessions over time chart (if timestamp-ish column exists)
             ts_col = next((c for c in ("timestamp", "started_at", "created_at")
                            if c in df_s.columns), None)

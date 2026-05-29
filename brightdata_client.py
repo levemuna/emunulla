@@ -248,6 +248,41 @@ def list_browser_sessions(limit: int = 50, status: str = "all") -> dict:
     return {"ok": True, "sessions": sessions}
 
 
+def get_browser_session(session_id: str) -> dict:
+    """Return full details for one browser session.
+
+    Endpoint: GET /browser_sessions/<id>
+    The payload is wrapped as ``{"session": {...}}``; we unwrap it.
+
+    Returns ``{"ok": bool, "session": {...}}`` — does not raise.
+    """
+    if not API_KEY:
+        return {"ok": False, "reason": "BRIGHTDATA_API_KEY not set in .env"}
+    if not session_id:
+        return {"ok": False, "reason": "No session_id given"}
+    try:
+        r = requests.get(
+            f"{BRIGHTDATA_ROOT}/browser_sessions/{session_id}",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        return {"ok": False, "reason": f"Network error: {e!r}"}
+
+    if r.status_code != 200:
+        return {"ok": False, "reason": f"HTTP {r.status_code}",
+                "body": r.text[:300]}
+    try:
+        data = r.json()
+    except ValueError:
+        return {"ok": False, "reason": "Non-JSON response", "body": r.text[:300]}
+
+    session = data.get("session", data) if isinstance(data, dict) else {}
+    if not isinstance(session, dict):
+        session = {}
+    return {"ok": True, "session": session}
+
+
 def summarize_sessions(sessions: list[dict]) -> dict:
     """KPIs over a list of session dicts. Tolerant to schema variation."""
     if not sessions:
